@@ -19,8 +19,6 @@ pub use tokio_service::Service;
 
 use header::{Headers, Host};
 use http::{self, TokioBody};
-use http::response;
-use http::request;
 use method::Method;
 use self::pool::{Pool, Pooled};
 use uri::{self, Uri};
@@ -152,7 +150,7 @@ where C: Connect,
             }
         };
         let host = Host::new(domain.host().expect("authority implies host").to_owned(), domain.port());
-        let (mut head, body) = request::split(req);
+        let (_, mut head, body) = req.unpack();
         let mut headers = Headers::new();
         headers.set(host);
         headers.extend(head.headers.iter());
@@ -196,8 +194,8 @@ where C: Connect,
         });
         FutureResponse(Box::new(resp.map(|msg| {
             match msg {
-                Message::WithoutBody(head) => response::from_wire(head, None),
-                Message::WithBody(head, body) => response::from_wire(head, Some(body.into())),
+                Message::WithoutBody(head) => Response::pack(head, None),
+                Message::WithBody(head, body) => Response::pack(head, Some(body.into())),
             }
         })))
     }

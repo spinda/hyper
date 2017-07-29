@@ -1,11 +1,40 @@
+//! Types to represent HTTP requests.
 use std::fmt;
 
 use header::Headers;
-use http::{Body, MessageHead, RequestHead, RequestLine};
+use http::{Body, MessageHead};
 use method::Method;
 use uri::{self, Uri};
 use version::HttpVersion;
 use std::net::SocketAddr;
+
+/// A request message head.
+pub type RequestHead = MessageHead<RequestLine>;
+
+/// An HTTP request line.
+#[derive(Debug, Default, PartialEq)]
+pub struct RequestLine {
+    /// Request method/
+    pub method: Method,
+    /// Request URI.
+    pub uri: Uri,
+}
+
+impl RequestLine {
+    /// Constructs a new `RequestLine` from a method and URI.
+    pub fn new(method: Method, uri: Uri) -> Self {
+        RequestLine {
+            method: method,
+            uri: uri,
+        }
+    }
+}
+
+impl fmt::Display for RequestLine {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} {}", self.method, self.uri)
+    }
+}
 
 /// An HTTP Request
 pub struct Request<B = Body> {
@@ -104,6 +133,41 @@ impl<B> Request<B> {
     /// protected by TLS.
     #[inline]
     pub fn set_proxy(&mut self, is_proxy: bool) { self.is_proxy = is_proxy; }
+
+    /// Constructs a request using a RequestHead and optional remote address and body.
+    pub fn pack(remote_addr: Option<SocketAddr>,
+                head: RequestHead,
+                body: Option<B>)
+                -> Request<B> {
+        let MessageHead { version, subject: RequestLine { method, uri }, headers } = head;
+        info!("Request::new: {}\"{} {} {}\"", MaybeAddr(&remote_addr), method, uri, version);
+        debug!("Request::new: headers={:?}", headers);
+
+        Request::<B> {
+            method: method,
+            uri: uri,
+            headers: headers,
+            version: version,
+            remote_addr: remote_addr,
+            body: body,
+            is_proxy: false,
+        }
+    }
+
+    /// Deconstructs a request into a RequestHead and optional remote address and body.
+    pub fn unpack(self) -> (Option<SocketAddr>, RequestHead, Option<B>) {
+        let uri = if self.is_proxy {
+            self.uri
+        } else {
+            uri::origin_form(&self.uri)
+        };
+        let head = RequestHead {
+            subject: ::http::RequestLine::new(self.method, uri),
+            headers: self.headers,
+            version: self.version,
+        };
+        (self.remote_addr, head, self.body)
+    }
 }
 
 impl Request<Body> {
@@ -143,37 +207,6 @@ impl<'a> fmt::Display for MaybeAddr<'a> {
             None => Ok(()),
         }
     }
-}
-
-/// Constructs a request using a received ResponseHead and optional body
-pub fn from_wire<B>(addr: Option<SocketAddr>, incoming: RequestHead, body: B) -> Request<B> {
-    let MessageHead { version, subject: RequestLine(method, uri), headers } = incoming;
-    info!("Request::new: {}\"{} {} {}\"", MaybeAddr(&addr), method, uri, version);
-    debug!("Request::new: headers={:?}", headers);
-
-    Request::<B> {
-        method: method,
-        uri: uri,
-        headers: headers,
-        version: version,
-        remote_addr: addr,
-        body: Some(body),
-        is_proxy: false,
-    }
-}
-
-pub fn split<B>(req: Request<B>) -> (RequestHead, Option<B>) {
-    let uri = if req.is_proxy {
-        req.uri
-    } else {
-        uri::origin_form(&req.uri)
-    };
-    let head = RequestHead {
-        subject: ::http::RequestLine(req.method, uri),
-        headers: req.headers,
-        version: req.version,
-    };
-    (head, req.body)
 }
 
 #[cfg(test)]

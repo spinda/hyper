@@ -2,7 +2,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::io;
 use std::mem;
-//use std::net::SocketAddr;
+// use std::net::SocketAddr;
 
 use futures::{Future, Poll, Async};
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -18,19 +18,19 @@ use super::dns;
 /// This trait is not implemented directly, and only exists to make
 /// the intent clearer. A connector should implement `Service` with
 /// `Request=Uri` and `Response: Io` instead.
-pub trait Connect: Service<Request=Uri, Error=io::Error> + 'static {
+pub trait Connect: Service<Request = Uri, Error = io::Error> + 'static {
     /// The connected Io Stream.
     type Output: AsyncRead + AsyncWrite + 'static;
     /// A Future that will resolve to the connected Stream.
-    type Future: Future<Item=Self::Output, Error=io::Error> + 'static;
+    type Future: Future<Item = Self::Output, Error = io::Error> + 'static;
     /// Connect to a remote address.
     fn connect(&self, Uri) -> <Self as Connect>::Future;
 }
 
 impl<T> Connect for T
-where T: Service<Request=Uri, Error=io::Error> + 'static,
-      T::Response: AsyncRead + AsyncWrite,
-      T::Future: Future<Error=io::Error>,
+    where T: Service<Request = Uri, Error = io::Error> + 'static,
+          T::Response: AsyncRead + AsyncWrite,
+          T::Future: Future<Error = io::Error>
 {
     type Output = T::Response;
     type Future = T::Future;
@@ -49,7 +49,6 @@ pub struct HttpConnector {
 }
 
 impl HttpConnector {
-
     /// Construct a new HttpConnector.
     ///
     /// Takes number of DNS worker threads.
@@ -102,10 +101,12 @@ impl Service for HttpConnector {
         };
         let port = match uri.port() {
             Some(port) => port,
-            None => match uri.scheme() {
-                Some("https") => 443,
-                _ => 80,
-            },
+            None => {
+                match uri.scheme() {
+                    Some("https") => 443,
+                    _ => 80,
+                }
+            }
         };
 
         HttpConnecting {
@@ -171,7 +172,7 @@ impl Future for HttpConnecting {
                 State::Lazy(ref dns, ref mut host, port) => {
                     let host = mem::replace(host, String::new());
                     state = State::Resolving(dns.resolve(host, port));
-                },
+                }
                 State::Resolving(ref mut query) => {
                     match try!(query.poll()) {
                         Async::NotReady => return Ok(Async::NotReady),
@@ -182,7 +183,7 @@ impl Future for HttpConnecting {
                             })
                         }
                     };
-                },
+                }
                 State::Connecting(ref mut c) => return c.poll(&self.handle).map_err(From::from),
                 State::Error(ref mut e) => return Err(e.take().expect("polled more than once")),
             }
@@ -231,17 +232,16 @@ impl ConnectingTcp {
     }
 }
 
-/*
-impl<S: SslClient> HttpsConnector<S> {
-    /// Create a new connector using the provided SSL implementation.
-    pub fn new(s: S) -> HttpsConnector<S> {
-        HttpsConnector {
-            http: HttpConnector::default(),
-            ssl: s,
-        }
-    }
-}
-*/
+// impl<S: SslClient> HttpsConnector<S> {
+// Create a new connector using the provided SSL implementation.
+// pub fn new(s: S) -> HttpsConnector<S> {
+// HttpsConnector {
+// http: HttpConnector::default(),
+// ssl: s,
+// }
+// }
+// }
+//
 
 #[cfg(test)]
 mod tests {
@@ -255,7 +255,8 @@ mod tests {
         let url = "/foo/bar?baz".parse().unwrap();
         let connector = HttpConnector::new(1, &core.handle());
 
-        assert_eq!(core.run(connector.connect(url)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(core.run(connector.connect(url)).unwrap_err().kind(),
+                   io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -264,7 +265,8 @@ mod tests {
         let url = "https://example.domain/foo/bar?baz".parse().unwrap();
         let connector = HttpConnector::new(1, &core.handle());
 
-        assert_eq!(core.run(connector.connect(url)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(core.run(connector.connect(url)).unwrap_err().kind(),
+                   io::ErrorKind::InvalidInput);
     }
 
 
@@ -274,6 +276,7 @@ mod tests {
         let url = "example.domain".parse().unwrap();
         let connector = HttpConnector::new(1, &core.handle());
 
-        assert_eq!(core.run(connector.connect(url)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(core.run(connector.connect(url)).unwrap_err().kind(),
+                   io::ErrorKind::InvalidInput);
     }
 }

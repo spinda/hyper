@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 
+use bytes::BytesMut;
 use futures::{Poll, Async, AsyncSink, Stream, Sink, StartSend};
 use futures::task::Task;
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -113,11 +114,11 @@ where I: AsyncRead + AsyncWrite,
                     }
                 };
                 self.state.busy();
-                if head.expecting_continue() {
+                if http::expecting_continue(&head) {
                     let msg = b"HTTP/1.1 100 Continue\r\n\r\n";
                     self.state.writing = Writing::Continue(Cursor::new(msg));
                 }
-                let wants_keep_alive = head.should_keep_alive();
+                let wants_keep_alive = http::should_keep_alive(&head);
                 self.state.keep_alive &= wants_keep_alive;
                 let (body, reading) = if decoder.is_eof() {
                     (false, Reading::KeepAlive)
@@ -238,7 +239,7 @@ where I: AsyncRead + AsyncWrite,
     fn write_head(&mut self, head: http::MessageHead<T::Outgoing>, body: bool) {
         debug_assert!(self.can_write_head());
 
-        let wants_keep_alive = head.should_keep_alive();
+        let wants_keep_alive = http::should_keep_alive(&head);
         self.state.keep_alive &= wants_keep_alive;
         let mut buf = self.io.write_buf_mut();
         // if a 100-continue has started but not finished sending, tack the
@@ -366,7 +367,12 @@ where I: AsyncRead + AsyncWrite,
         self.try_keep_alive();
         trace!("flushed {:?}", self.state);
         Ok(Async::Ready(()))
+    }
 
+    /// Extracts the underlying I/O stream and any buffered data already read.
+    /// The write buffer must be empty before this function is called.
+    pub unsafe fn into_inner(self) -> (I, BytesMut) {
+        self.io.into_inner()
     }
 }
 
@@ -728,7 +734,7 @@ mod tests {
         match conn.poll().unwrap() {
             Async::Ready(Some(Frame::Message { message, body: false })) => {
                 assert_eq!(message, MessageHead {
-                    subject: ::http::RequestLine(::Get, Uri::from_str("/").unwrap()),
+                    subject: ::http::RequestLine::new(::Get, Uri::from_str("/").unwrap()),
                     .. MessageHead::default()
                 })
             },

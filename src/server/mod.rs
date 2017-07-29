@@ -14,20 +14,23 @@ use std::time::Duration;
 use futures::future;
 use futures::task::{self, Task};
 use futures::{Future, Stream, Poll, Async, Sink, StartSend, AsyncSink};
-use futures::future::Map;
+use futures::future::{FutureResult, Map};
+use futures::sink;
 
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio::reactor::{Core, Handle, Timeout};
 use tokio::net::TcpListener;
 use tokio_proto::BindServer;
 use tokio_proto::streaming::Message;
-use tokio_proto::streaming::pipeline::{Transport, Frame, ServerProto};
+use tokio_proto::streaming::pipeline::Transport;
+pub use tokio_proto::streaming::pipeline::{Frame, ServerProto};
 pub use tokio_service::{NewService, Service};
 
-use http;
-use http::response;
-use http::request;
+use bytes::BytesMut;
 
+use http;
+
+pub use http::{RequestHead, ResponseHead};
 pub use http::response::Response;
 pub use http::request::Request;
 
@@ -149,32 +152,92 @@ impl<B> fmt::Debug for Http<B> {
     }
 }
 
-#[doc(hidden)]
-#[allow(missing_debug_implementations)]
-pub struct __ProtoRequest(http::RequestHead);
-#[doc(hidden)]
-#[allow(missing_debug_implementations)]
-pub struct __ProtoResponse(ResponseHead);
-#[doc(hidden)]
-#[allow(missing_debug_implementations)]
-pub struct __ProtoTransport<T, B>(http::Conn<T, B, http::ServerTransaction>);
-#[doc(hidden)]
-#[allow(missing_debug_implementations)]
-pub struct __ProtoBindTransport<T, B> {
-    inner: future::FutureResult<http::Conn<T, B, http::ServerTransaction>, io::Error>,
+/// An HTTP server transport bound to an underlying I/O stream, implementing
+/// tokio-proto's `Transport` trait as well as `Stream` and `Sink`.
+///
+/// This structure can be used to manage an HTTP server connection directly,
+/// reading in the `Stream` of requests and writing responses to the `Sink`.
+/// It can be created via `Http`'s `ServerProto` implementation.
+pub struct ServerTransport<T, B = ::Chunk>(http::Conn<T, B, http::ServerTransaction>);
+
+impl<T, B> ServerTransport<T, B>
+    where T: AsyncRead + AsyncWrite + 'static,
+          B: AsRef<[u8]> + 'static,
+{
+    /// Extracts the underlying I/O stream and any buffered data already
+    /// read, after flushing any response frames in flight.
+    pub fn into_inner(self) -> ServerTransportIntoInner<T, B> {
+        ServerTransportIntoInner(Some(self.flush()))
+    }
+}
+
+/// The return type of `ServerTransport::flush`.
+///
+/// Extracts the underlying I/O stream and any buffered data already
+/// read, after flushing any response frames in flight.
+pub struct ServerTransportIntoInner<T, B = ::Chunk>(Option<sink::Flush<ServerTransport<T, B>>>);
+
+impl<T, B> fmt::Debug for ServerTransportIntoInner<T, B> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ServerTransportIntoInner")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl<T, B> Future for ServerTransportIntoInner<T, B>
+    where T: AsyncRead + AsyncWrite + 'static,
+          B: AsRef<[u8]> + 'static,
+{
+    type Item = (T, BytesMut);
+    type Error = io::Error;
+
+    #[inline]
+    fn poll(&mut self) -> Poll<(T, BytesMut), io::Error> {
+        let future =
+            self.0.as_mut().expect("hyper: ServerTransportIntoInner called after completion");
+        let transport = try_ready!(future.poll());
+        Ok(unsafe { transport.0.into_inner() }.into())
+    }
+}
+
+impl<T, B> fmt::Debug for ServerTransport<T, B> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ServerTransport")
+            .field(&"...")
+            .finish()
+    }
+}
+
+/// A `Future` which resolves to a `ServerTransport`, used in `Http`'s
+/// `ServerProto` implementation.
+pub struct ServerBindTransport<T, B = ::Chunk>(FutureResult<ServerTransport<T, B>, io::Error>);
+
+/// Incoming request frame.
+pub type RequestFrame = Frame<RequestHead, http::Chunk, ::Error>;
+
+/// Outgoing response frame.
+pub type ResponseFrame<B = ::Chunk> = Frame<ResponseHead, B, ::Error>;
+
+impl<T, B> fmt::Debug for ServerBindTransport<T, B> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ServerBindTransport")
+            .field(&self.0)
+            .finish()
+    }
 }
 
 impl<T, B> ServerProto<T> for Http<B>
     where T: AsyncRead + AsyncWrite + 'static,
           B: AsRef<[u8]> + 'static,
 {
-    type Request = __ProtoRequest;
-    type RequestBody = http::Chunk;
-    type Response = __ProtoResponse;
+    type Request = RequestHead;
+    type RequestBody = ::Chunk;
+    type Response = ResponseHead;
     type ResponseBody = B;
     type Error = ::Error;
-    type Transport = __ProtoTransport<T, B>;
-    type BindTransport = __ProtoBindTransport<T, B>;
+    type Transport = ServerTransport<T, B>;
+    type BindTransport = ServerBindTransport<T, B>;
 
     #[inline]
     fn bind_transport(&self, io: T) -> Self::BindTransport {
@@ -183,17 +246,15 @@ impl<T, B> ServerProto<T> for Http<B>
         } else {
             http::KA::Disabled
         };
-        __ProtoBindTransport {
-            inner: future::ok(http::Conn::new(io, ka)),
-        }
+        ServerBindTransport(future::ok(ServerTransport(http::Conn::new(io, ka))))
     }
 }
 
-impl<T, B> Sink for __ProtoTransport<T, B>
+impl<T, B> Sink for ServerTransport<T, B>
     where T: AsyncRead + AsyncWrite + 'static,
           B: AsRef<[u8]> + 'static,
 {
-    type SinkItem = Frame<__ProtoResponse, B, ::Error>;
+    type SinkItem = ResponseFrame<B>;
     type SinkError = io::Error;
 
     #[inline]
@@ -201,7 +262,7 @@ impl<T, B> Sink for __ProtoTransport<T, B>
                   -> StartSend<Self::SinkItem, io::Error> {
         let item = match item {
             Frame::Message { message, body } => {
-                Frame::Message { message: message.0, body: body }
+                Frame::Message { message: message, body: body }
             }
             Frame::Body { chunk } => Frame::Body { chunk: chunk },
             Frame::Error { error } => Frame::Error { error: error },
@@ -210,7 +271,7 @@ impl<T, B> Sink for __ProtoTransport<T, B>
             AsyncSink::Ready => Ok(AsyncSink::Ready),
             AsyncSink::NotReady(Frame::Message { message, body }) => {
                 Ok(AsyncSink::NotReady(Frame::Message {
-                    message: __ProtoResponse(message),
+                    message: message,
                     body: body,
                 }))
             }
@@ -234,11 +295,11 @@ impl<T, B> Sink for __ProtoTransport<T, B>
     }
 }
 
-impl<T, B> Stream for __ProtoTransport<T, B>
+impl<T, B> Stream for ServerTransport<T, B>
     where T: AsyncRead + AsyncWrite + 'static,
           B: AsRef<[u8]> + 'static,
 {
-    type Item = Frame<__ProtoRequest, http::Chunk, ::Error>;
+    type Item = Frame<RequestHead, http::Chunk, ::Error>;
     type Error = io::Error;
 
     #[inline]
@@ -249,7 +310,7 @@ impl<T, B> Stream for __ProtoTransport<T, B>
         };
         let item = match item {
             Frame::Message { message, body } => {
-                Frame::Message { message: __ProtoRequest(message), body: body }
+                Frame::Message { message: message, body: body }
             }
             Frame::Body { chunk } => Frame::Body { chunk: chunk },
             Frame::Error { error } => Frame::Error { error: error },
@@ -258,7 +319,7 @@ impl<T, B> Stream for __ProtoTransport<T, B>
     }
 }
 
-impl<T, B> Transport for __ProtoTransport<T, B>
+impl<T, B> Transport for ServerTransport<T, B>
     where T: AsyncRead + AsyncWrite + 'static,
           B: AsRef<[u8]> + 'static,
 {
@@ -273,38 +334,15 @@ impl<T, B> Transport for __ProtoTransport<T, B>
     }
 }
 
-impl<T, B> Future for __ProtoBindTransport<T, B>
+impl<T, B> Future for ServerBindTransport<T, B>
     where T: AsyncRead + AsyncWrite + 'static,
 {
-    type Item = __ProtoTransport<T, B>;
+    type Item = ServerTransport<T, B>;
     type Error = io::Error;
 
     #[inline]
-    fn poll(&mut self) -> Poll<__ProtoTransport<T, B>, io::Error> {
-        self.inner.poll().map(|a| a.map(__ProtoTransport))
-    }
-}
-
-impl From<Message<__ProtoRequest, http::TokioBody>> for Request {
-    #[inline]
-    fn from(message: Message<__ProtoRequest, http::TokioBody>) -> Request {
-        let (head, body) = match message {
-            Message::WithoutBody(head) => (head.0, http::Body::empty()),
-            Message::WithBody(head, body) => (head.0, body.into()),
-        };
-        request::from_wire(None, head, body)
-    }
-}
-
-impl<B> Into<Message<__ProtoResponse, B>> for Response<B> {
-    #[inline]
-    fn into(self) -> Message<__ProtoResponse, B> {
-        let (head, body) = response::split(self);
-        if let Some(body) = body {
-            Message::WithBody(__ProtoResponse(head), body.into())
-        } else {
-            Message::WithoutBody(__ProtoResponse(head))
-        }
+    fn poll(&mut self) -> Poll<ServerTransport<T, B>, io::Error> {
+        self.0.poll()
     }
 }
 
@@ -313,26 +351,37 @@ struct HttpService<T> {
     remote_addr: SocketAddr,
 }
 
-type ResponseHead = http::MessageHead<::StatusCode>;
-
 impl<T, B> Service for HttpService<T>
     where T: Service<Request=Request, Response=Response<B>, Error=::Error>,
           B: Stream<Error=::Error>,
           B::Item: AsRef<[u8]>,
 {
-    type Request = Message<__ProtoRequest, http::TokioBody>;
-    type Response = Message<__ProtoResponse, B>;
+    type Request = Message<RequestHead, http::TokioBody>;
+    type Response = Message<ResponseHead, B>;
     type Error = ::Error;
-    type Future = Map<T::Future, fn(Response<B>) -> Message<__ProtoResponse, B>>;
+    type Future = Map<T::Future, fn(Response<B>) -> Message<ResponseHead, B>>;
 
     #[inline]
     fn call(&self, message: Self::Request) -> Self::Future {
         let (head, body) = match message {
-            Message::WithoutBody(head) => (head.0, http::Body::empty()),
-            Message::WithBody(head, body) => (head.0, body.into()),
+            Message::WithoutBody(head) => (head, None),
+            Message::WithBody(head, body) => (head, Some(body.into())),
         };
-        let req = request::from_wire(Some(self.remote_addr), head, body);
+
+        let req = Request::pack(Some(self.remote_addr), head, body);
         self.inner.call(req).map(Into::into)
+    }
+}
+
+impl<B> Into<Message<ResponseHead, B>> for Response<B> {
+    #[inline]
+    fn into(self) -> Message<ResponseHead, B> {
+        let (head, body) = self.unpack();
+        if let Some(body) = body {
+            Message::WithBody(head, body.into())
+        } else {
+            Message::WithoutBody(head)
+        }
     }
 }
 

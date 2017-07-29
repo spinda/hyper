@@ -1,17 +1,19 @@
+//! Types to represent HTTP responses.
 use std::fmt;
 
 use header::{Header, Headers};
-use http::{MessageHead, ResponseHead, Body};
+use http::{MessageHead, Body};
 use status::StatusCode;
 use version::HttpVersion;
+
+/// A response message head.
+pub type ResponseHead = MessageHead<StatusCode>;
 
 /// An HTTP Response
 pub struct Response<B = Body> {
     version: HttpVersion,
     headers: Headers,
     status: StatusCode,
-    #[cfg(feature = "raw_status")]
-    raw_status: ::http::RawStatus,
     body: Option<B>,
 }
 
@@ -37,14 +39,6 @@ impl<B> Response<B> {
     /// Get the status from the server.
     #[inline]
     pub fn status(&self) -> StatusCode { self.status }
-
-    /// Get the raw status code and reason.
-    ///
-    /// This method is only useful when inspecting the raw subject line from
-    /// a received response.
-    #[inline]
-    #[cfg(feature = "raw_status")]
-    pub fn status_raw(&self) -> &::http::RawStatus { &self.raw_status }
 
     /// Set the `StatusCode` for this response.
     #[inline]
@@ -97,6 +91,31 @@ impl<B> Response<B> {
     /// Read the body.
     #[inline]
     pub fn body_ref(&self) -> Option<&B> { self.body.as_ref() }
+
+    /// Constructs a response using a ResponseHead and optional body.
+    #[inline]
+    pub fn pack(head: ResponseHead, body: Option<B>) -> Response<B> {
+        info!("Response::new \"{} {}\"", head.version, head.subject);
+        debug!("Response::new headers={:?}", head.headers);
+
+        Response::<B> {
+            status: head.subject,
+            version: head.version,
+            headers: head.headers,
+            body: body,
+        }
+    }
+
+    /// Deconstructs a response into a ResponseHead and optional bodyu.
+    #[inline]
+    pub fn unpack(self) -> (MessageHead<StatusCode>, Option<B>) {
+        let head = MessageHead::<StatusCode> {
+            version: self.version,
+            headers: self.headers,
+            subject: self.status,
+        };
+        (head, self.body)
+    }
 }
 
 impl Response<Body> {
@@ -107,26 +126,12 @@ impl Response<Body> {
     }
 }
 
-#[cfg(not(feature = "raw_status"))]
 impl<B> Default for Response<B> {
     fn default() -> Response<B> {
         Response::<B> {
             version: Default::default(),
             headers: Default::default(),
             status: Default::default(),
-            body: None,
-        }
-    }
-}
-
-#[cfg(feature = "raw_status")]
-impl<B> Default for Response<B> {
-    fn default() -> Response<B> {
-        Response::<B> {
-            version: Default::default(),
-            headers: Default::default(),
-            status: Default::default(),
-            raw_status: Default::default(),
             body: None,
         }
     }
@@ -140,48 +145,4 @@ impl fmt::Debug for Response {
             .field("headers", &self.headers)
             .finish()
     }
-}
-
-/// Constructs a response using a received ResponseHead and optional body
-#[inline]
-#[cfg(not(feature = "raw_status"))]
-pub fn from_wire<B>(incoming: ResponseHead, body: Option<B>) -> Response<B> {
-    let status = incoming.status();
-    info!("Response::new \"{} {}\"", incoming.version, status);
-    debug!("Response::new headers={:?}", incoming.headers);
-
-    Response::<B> {
-        status: status,
-        version: incoming.version,
-        headers: incoming.headers,
-        body: body,
-    }
-}
-
-/// Constructs a response using a received ResponseHead and optional body
-#[inline]
-#[cfg(feature = "raw_status")]
-pub fn from_wire<B>(incoming: ResponseHead, body: Option<B>) -> Response<B> {
-    let status = incoming.status();
-    info!("Response::new \"{} {}\"", incoming.version, status);
-    debug!("Response::new headers={:?}", incoming.headers);
-
-    Response::<B> {
-        status: status,
-        version: incoming.version,
-        headers: incoming.headers,
-        raw_status: incoming.subject,
-        body: body,
-    }
-}
-
-/// Splits this response into a MessageHead<StatusCode> and its body
-#[inline]
-pub fn split<B>(res: Response<B>) -> (MessageHead<StatusCode>, Option<B>) {
-    let head = MessageHead::<StatusCode> {
-        version: res.version,
-        headers: res.headers,
-        subject: res.status
-    };
-    (head, res.body)
 }

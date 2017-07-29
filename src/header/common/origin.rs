@@ -140,8 +140,8 @@ impl fmt::Display for Origin {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             &Origin(OriginOrNull::Origin { ref scheme, ref host }) => write!(f, "{}://{}", scheme, host),
-            /// Serialized as "null" per ASCII serialization of an origin
-            /// https://html.spec.whatwg.org/multipage/browsers.html#ascii-serialisation-of-an-origin
+            // Serialized as "null" per ASCII serialization of an origin
+            // https://html.spec.whatwg.org/multipage/browsers.html#ascii-serialisation-of-an-origin
             _ => write!(f, "null")
         }
     }

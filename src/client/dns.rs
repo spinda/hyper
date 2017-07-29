@@ -12,9 +12,7 @@ pub struct Dns {
 
 impl Dns {
     pub fn new(threads: usize) -> Dns {
-        Dns {
-            pool: CpuPool::new(threads)
-        }
+        Dns { pool: CpuPool::new(threads) }
     }
 
     pub fn resolve(&self, host: String, port: u16) -> Query {

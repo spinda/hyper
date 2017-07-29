@@ -43,4 +43,3 @@ spmc = "0.2"
 [features]
 default = []
 nightly = []
-raw_status = []
